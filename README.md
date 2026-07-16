@@ -1,4 +1,4 @@
-# JavisPi 🤖
+# JavisPi Chatbot
 
 An offline voice assistant that runs entirely on a Raspberry Pi.
 No cloud, no API keys, no internet needed after setup.
