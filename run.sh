@@ -1,10 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
+#!/bin/bash
+# Start JavisPi (activates the venv for you)
 cd "$(dirname "$0")"
-
-if [ -x ./.venv/bin/python ]; then
-  ./.venv/bin/python main.py --demo
-else
-  python3 main.py --demo
-fi
+source venv/bin/activate
+python3 main.py

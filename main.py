@@ -1,89 +1,191 @@
 #!/usr/bin/env python3
-"""Offline voice-assistant scaffold for a Raspberry Pi."""
+"""
+JavisPi - Offline voice assistant for Raspberry Pi
+Listens (Vosk) -> Thinks (llama.cpp) -> Speaks (Piper)
 
-from __future__ import annotations
+Monitor edition: terminal = display, ENTER key = push-to-talk.
+Later, swap ConsoleDisplay for WhisplayDisplay without touching the loop.
+"""
 
-import argparse
 import os
 import sys
-from pathlib import Path
-from typing import Optional
+import json
+import queue
+import subprocess
 
-ROOT = Path(__file__).resolve().parent
+try:
+    import sounddevice as sd
+    from vosk import Model, KaldiRecognizer
+except ImportError:
+    print("Missing packages. Activate the venv first:")
+    print("  source venv/bin/activate")
+    sys.exit(1)
+
+# ---------------------------------------------------------------
+# Paths (portable - everything relative to this file)
+# ---------------------------------------------------------------
+BASE = os.path.dirname(os.path.abspath(__file__))
+VOSK_MODEL = os.path.join(BASE, "models", "vosk-model-small-en-us-0.15")
+LLM_MODEL = os.path.join(BASE, "models", "qwen2.5-0.5b-instruct-q4_k_m.gguf")
+PIPER_BIN = os.path.join(BASE, "piper", "piper")
+PIPER_VOICE = os.path.join(BASE, "models", "en_US-lessac-medium.onnx")
+LLAMA_BIN = os.path.expanduser("~/llama.cpp/build/bin/llama-cli")
+
+SAMPLE_RATE = 16000
+MAX_REPLY_TOKENS = "60"
+
+SYSTEM_PROMPT = (
+    "You are Javis, a friendly voice assistant running on a Raspberry Pi. "
+    "Answer briefly in one or two short sentences."
+)
 
 
-class OfflineAssistant:
-    def __init__(self) -> None:
-        self.stt_model = os.getenv("STT_MODEL", "vosk-model-small-en-us-0.15")
-        self.llm_model = os.getenv("LLM_MODEL", "qwen2.5-0.5b-instruct-q4_k_m.gguf")
-        self.tts_voice = os.getenv("TTS_VOICE", "en_US-lessac-medium")
-        self.mic_card = os.getenv("MIC_CARD", "0")
+# ---------------------------------------------------------------
+# Display abstraction (swap for Whisplay LCD later)
+# ---------------------------------------------------------------
+class ConsoleDisplay:
+    def status(self, text):
+        print(f"\n[STATUS] {text}")
 
-    def transcribe_audio(self, audio_path: Optional[Path] = None) -> str:
-        if audio_path is None:
-            return ""
-        return f"[transcribed from {audio_path.name}]"
+    def show_user(self, text):
+        print(f"YOU:  {text}")
 
-    def generate_reply(self, text: str) -> str:
-        cleaned = (text or "").strip()
-        if not cleaned:
-            return "I’m listening. Say something and I’ll answer offline."
+    def show_bot(self, text):
+        print(f"BOT:  {text}")
 
-        lowered = cleaned.lower()
-        if any(keyword in lowered for keyword in ["hello", "hi", "hey"]):
-            return "Hello! I’m JarvisPi, your offline voice assistant."
-        if any(keyword in lowered for keyword in ["time", "date"]):
-            return "I’m still running in local demo mode, but the pipeline is ready for a Pi deployment."
-        if any(keyword in lowered for keyword in ["weather", "temperature"]):
-            return "Weather lookup is not wired up yet, but the offline stack is ready to grow."
-        if any(keyword in lowered for keyword in ["quit", "exit", "stop"]):
-            return "Goodbye."
-        return f"You said: {cleaned}. I’m answering locally in demo mode."
+    def error(self, text):
+        print(f"[ERROR] {text}")
 
-    def speak_reply(self, text: str) -> str:
-        print(f"JarvisPi: {text}")
-        return text
 
-    def run_demo(self) -> None:
-        print("JarvisPi demo mode. Type 'quit' to leave.")
+display = ConsoleDisplay()
+
+
+# ---------------------------------------------------------------
+# Startup checks
+# ---------------------------------------------------------------
+def check_files():
+    problems = []
+    if not os.path.isdir(VOSK_MODEL):
+        problems.append(f"Vosk model missing: {VOSK_MODEL}")
+    if not os.path.isfile(LLM_MODEL):
+        problems.append(f"LLM model missing: {LLM_MODEL}")
+    if not os.path.isfile(LLAMA_BIN):
+        problems.append(f"llama-cli missing: {LLAMA_BIN}")
+    if not os.path.isfile(PIPER_BIN):
+        problems.append(f"Piper missing: {PIPER_BIN}")
+    if not os.path.isfile(PIPER_VOICE):
+        problems.append(f"Piper voice missing: {PIPER_VOICE}")
+    if problems:
+        display.error("Setup incomplete. Run: bash install.sh")
+        for p in problems:
+            print("  -", p)
+        sys.exit(1)
+
+
+def pick_mic():
+    """Auto-select the first device with input channels (usually the USB mic)."""
+    try:
+        devices = sd.query_devices()
+        for idx, dev in enumerate(devices):
+            if dev["max_input_channels"] > 0:
+                display.status(f"Using mic: {dev['name']} (device {idx})")
+                return idx
+    except Exception as e:
+        display.error(f"Could not query audio devices: {e}")
+    display.error("No microphone found. Plug in a USB mic and try again.")
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------
+# The three stages
+# ---------------------------------------------------------------
+def listen(model, mic_index):
+    """Record from mic until Vosk detects end of utterance, return text."""
+    rec = KaldiRecognizer(model, SAMPLE_RATE)
+    audio_q = queue.Queue()
+
+    def callback(indata, frames, time_info, status):
+        audio_q.put(bytes(indata))
+
+    display.status("Listening... speak now")
+    with sd.RawInputStream(
+        samplerate=SAMPLE_RATE,
+        blocksize=8000,
+        dtype="int16",
+        channels=1,
+        device=mic_index,
+        callback=callback,
+    ):
         while True:
-            try:
-                user_text = input("You: ").strip()
-            except EOFError:
-                print()
-                break
-            if not user_text:
-                continue
-            reply = self.generate_reply(user_text)
-            self.speak_reply(reply)
-            if reply.lower() == "goodbye.":
-                break
+            data = audio_q.get()
+            if rec.AcceptWaveform(data):
+                text = json.loads(rec.Result()).get("text", "").strip()
+                if text:
+                    return text
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Offline voice assistant scaffold")
-    parser.add_argument("--demo", action="store_true", help="run in local demo mode")
-    parser.add_argument("--text", help="process a single text input")
-    parser.add_argument("--loop", action="store_true", help="run the interactive loop")
-    return parser.parse_args()
+def think(prompt):
+    display.status("Thinking... (first run is slow while the model loads)")
+    cmd = [
+        LLAMA_BIN,
+        "-m", LLM_MODEL,
+        "-p", f"{SYSTEM_PROMPT}\nUser: {prompt}\nAssistant:",
+        "-n", MAX_REPLY_TOKENS,
+        "--temp", "0.7",
+        "-no-cnv",
+        "--no-display-prompt",
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        reply = out.stdout.strip()
+        return reply if reply else "Sorry, I came up blank on that one."
+    except subprocess.TimeoutExpired:
+        return "Sorry, that took too long to think about."
+    except Exception as e:
+        display.error(f"LLM error: {e}")
+        return "Something went wrong in my brain."
 
 
-def main() -> int:
-    args = parse_args()
-    assistant = OfflineAssistant()
+def speak(text):
+    display.status("Speaking...")
+    # Escape double quotes so the shell pipe doesn't break
+    safe = text.replace('"', "'")
+    cmd = (
+        f'echo "{safe}" | "{PIPER_BIN}" --model "{PIPER_VOICE}" --output_raw '
+        f"| aplay -r 22050 -f S16_LE -t raw -"
+    )
+    try:
+        subprocess.run(cmd, shell=True, timeout=120)
+    except Exception as e:
+        display.error(f"TTS error: {e}")
 
-    if args.text:
-        reply = assistant.generate_reply(args.text)
-        assistant.speak_reply(reply)
-        return 0
 
-    if args.demo or args.loop or not sys.stdin.isatty():
-        assistant.run_demo()
-        return 0
+# ---------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------
+def main():
+    print("=" * 50)
+    print("  JavisPi - offline voice assistant")
+    print("=" * 50)
+    check_files()
+    mic_index = pick_mic()
 
-    assistant.run_demo()
-    return 0
+    display.status("Loading speech model...")
+    vosk_model = Model(VOSK_MODEL)
+    display.status("Ready.")
+
+    while True:
+        try:
+            input("\nPress ENTER to talk (Ctrl+C to quit)... ")
+            heard = listen(vosk_model, mic_index)
+            display.show_user(heard)
+            reply = think(heard)
+            display.show_bot(reply)
+            speak(reply)
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
