@@ -1,4 +1,3 @@
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +20,13 @@ class OfflineAssistantTests(unittest.TestCase):
         assistant = OfflineAssistant()
         self.assertEqual("vosk-model-small-en-us-0.15", assistant.stt_model)
         self.assertEqual("qwen2.5-0.5b-instruct-q4_k_m.gguf", assistant.llm_model)
+
+    def test_runtime_detection_reports_missing_backend(self) -> None:
+        assistant = OfflineAssistant()
+        self.assertIn("stt_available", assistant.runtime_status)
+        self.assertFalse(assistant.runtime_status["stt_available"])
+        self.assertFalse(assistant.runtime_status["llm_available"])
+        self.assertFalse(assistant.runtime_status["tts_available"])
 
 
 if __name__ == "__main__":
