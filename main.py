@@ -10,9 +10,7 @@ Later, swap ConsoleDisplay for WhisplayDisplay without touching the loop.
 import os
 import sys
 import json
-import time
 import queue
-import threading
 import subprocess
 
 try:
@@ -48,12 +46,6 @@ SYSTEM_PROMPT = (
 class ConsoleDisplay:
     def status(self, text):
         print(f"\n[STATUS] {text}")
-
-    def thinking(self, elapsed, frame):
-        print(f"\r[STATUS] Thinking {frame}  {elapsed}s ", end="", flush=True)
-
-    def clear_line(self):
-        print("\r" + " " * 70 + "\r", end="", flush=True)
 
     def show_user(self, text):
         print(f"YOU:  {text}")
@@ -91,22 +83,16 @@ def check_files():
 
 
 def pick_mic():
-    """Prefer the system default route (PipeWire/Pulse) so Bluetooth mics
-    work; fall back to the first raw device with input channels (USB mic)."""
+    """Auto-select the first device with input channels (usually the USB mic)."""
     try:
         devices = sd.query_devices()
-        for wanted in ("pipewire", "pulse", "default"):
-            for idx, dev in enumerate(devices):
-                if dev["max_input_channels"] > 0 and wanted in dev["name"].lower():
-                    display.status(f"Using mic: {dev['name']} (device {idx})")
-                    return idx
         for idx, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
                 display.status(f"Using mic: {dev['name']} (device {idx})")
                 return idx
     except Exception as e:
         display.error(f"Could not query audio devices: {e}")
-    display.error("No microphone found. Plug in a USB mic or connect a Bluetooth headset.")
+    display.error("No microphone found. Plug in a USB mic and try again.")
     sys.exit(1)
 
 
@@ -114,22 +100,14 @@ def pick_mic():
 # The three stages
 # ---------------------------------------------------------------
 def listen(model, mic_index):
-    """Record from the mic until the user presses ENTER again, return text."""
+    """Record from mic until Vosk detects end of utterance, return text."""
     rec = KaldiRecognizer(model, SAMPLE_RATE)
     audio_q = queue.Queue()
-    stop = threading.Event()
-
-    def wait_for_enter():
-        input()
-        stop.set()
-
-    threading.Thread(target=wait_for_enter, daemon=True).start()
 
     def callback(indata, frames, time_info, status):
         audio_q.put(bytes(indata))
 
-    display.status("Listening... speak, then press ENTER to stop")
-    pieces = []  # finalized sentence segments so far
+    display.status("Listening... speak now")
     with sd.RawInputStream(
         samplerate=SAMPLE_RATE,
         blocksize=8000,
@@ -138,28 +116,12 @@ def listen(model, mic_index):
         device=mic_index,
         callback=callback,
     ):
-        while not stop.is_set():
-            try:
-                data = audio_q.get(timeout=0.1)
-            except queue.Empty:
-                continue
+        while True:
+            data = audio_q.get()
             if rec.AcceptWaveform(data):
                 text = json.loads(rec.Result()).get("text", "").strip()
                 if text:
-                    pieces.append(text)
-            else:
-                partial = json.loads(rec.PartialResult()).get("partial", "")
-                heard_so_far = " ".join(pieces + [partial]).strip()
-                if heard_so_far:
-                    # live feedback so you can see the mic is actually working
-                    print(f"\r  (hearing: {heard_so_far[-60:]})", end="", flush=True)
-
-    # flush whatever was still buffered when ENTER was pressed
-    text = json.loads(rec.FinalResult()).get("text", "").strip()
-    if text:
-        pieces.append(text)
-    print()  # end the partial-results line
-    return " ".join(pieces)
+                    return text
 
 
 def think(prompt):
@@ -180,27 +142,14 @@ def think(prompt):
         "-o", reply_file,
     ]
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        start = time.time()
-        frames = "|/-\\"
-        i = 0
-        while proc.poll() is None:
-            display.thinking(int(time.time() - start), frames[i % len(frames)])
-            i += 1
-            time.sleep(0.25)
-            if time.time() - start > 180:
-                proc.kill()
-                proc.wait()
-                display.clear_line()
-                return "Sorry, that took too long to think about."
-        display.clear_line()
+        subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         with open(reply_file) as f:
             out = f.read()
         # file format: "User:\n<question>\n\nAssistant:\n<reply>\n"
         reply = out.split("Assistant:", 1)[-1].strip()
         return reply if reply else "Sorry, I came up blank on that one."
+    except subprocess.TimeoutExpired:
+        return "Sorry, that took too long to think about."
     except Exception as e:
         display.error(f"LLM error: {e}")
         return "Something went wrong in my brain."
@@ -246,9 +195,6 @@ def main():
         try:
             input("\nPress ENTER to talk (Ctrl+C to quit)... ")
             heard = listen(vosk_model, mic_index)
-            if not heard:
-                display.status("Didn't catch anything - press ENTER and try again.")
-                continue
             display.show_user(heard)
             reply = think(heard)
             display.show_bot(reply)

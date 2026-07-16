@@ -13,9 +13,7 @@ echo ""
 echo "=== [1/6] System packages ==="
 sudo apt update
 sudo apt install -y git python3-pip python3-venv portaudio19-dev \
-                    ffmpeg build-essential cmake wget unzip alsa-utils patchelf \
-                    bluez pipewire pipewire-pulse pipewire-alsa wireplumber \
-                    libspa-0.2-bluetooth
+                    ffmpeg build-essential cmake wget unzip alsa-utils
 
 echo ""
 echo "=== [2/6] Python environment ==="
@@ -24,10 +22,6 @@ if [ ! -d "venv" ]; then
 fi
 source venv/bin/activate
 pip install vosk sounddevice
-# vosk's prebuilt ARM library is flagged as needing an executable stack
-# (a leftover from its asm files) and glibc 2.41+ refuses to load it.
-# Clearing the flag is safe - vosk doesn't actually use an executable stack.
-find venv/lib -name libvosk.so -exec patchelf --clear-execstack {} \;
 
 echo ""
 echo "=== [3/6] Vosk speech model (~40MB) ==="
