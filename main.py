@@ -126,18 +126,27 @@ def listen(model, mic_index):
 
 def think(prompt):
     display.status("Thinking... (first run is slow while the model loads)")
+    # llama-cli is a chat client now: stdout carries spinner/banner noise, so
+    # we ask for a single turn (-st) and read the clean reply from a file (-o).
+    reply_file = "/tmp/javispi_reply.txt"
+    if os.path.exists(reply_file):
+        os.remove(reply_file)
     cmd = [
         LLAMA_BIN,
         "-m", LLM_MODEL,
-        "-p", f"{SYSTEM_PROMPT}\nUser: {prompt}\nAssistant:",
+        "-sys", SYSTEM_PROMPT,
+        "-p", prompt,
         "-n", MAX_REPLY_TOKENS,
         "--temp", "0.7",
-        "-no-cnv",
-        "--no-display-prompt",
+        "-st",
+        "-o", reply_file,
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        reply = out.stdout.strip()
+        subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        with open(reply_file) as f:
+            out = f.read()
+        # file format: "User:\n<question>\n\nAssistant:\n<reply>\n"
+        reply = out.split("Assistant:", 1)[-1].strip()
         return reply if reply else "Sorry, I came up blank on that one."
     except subprocess.TimeoutExpired:
         return "Sorry, that took too long to think about."
@@ -148,14 +157,22 @@ def think(prompt):
 
 def speak(text):
     display.status("Speaking...")
-    # Escape double quotes so the shell pipe doesn't break
-    safe = text.replace('"', "'")
-    cmd = (
-        f'echo "{safe}" | "{PIPER_BIN}" --model "{PIPER_VOICE}" --output_raw '
-        f"| aplay -r 22050 -f S16_LE -t raw -"
-    )
+    # Feed the text to Piper over stdin - no shell, so the LLM can emit
+    # quotes, backticks or $() without breaking (or running!) anything.
     try:
-        subprocess.run(cmd, shell=True, timeout=120)
+        piper = subprocess.Popen(
+            [PIPER_BIN, "--model", PIPER_VOICE, "--output_raw"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        )
+        aplay = subprocess.Popen(
+            ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+            stdin=piper.stdout,
+        )
+        piper.stdout.close()  # aplay owns it now; lets it see EOF
+        piper.stdin.write(text.encode())
+        piper.stdin.close()
+        aplay.wait(timeout=120)
+        piper.wait(timeout=10)
     except Exception as e:
         display.error(f"TTS error: {e}")
 

@@ -76,10 +76,11 @@ if [ ! -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
   fi
   cd "$HOME/llama.cpp"
   # -latomic: 32-bit ARM needs libatomic linked explicitly for 64-bit atomics.
-  # Only build llama-cli (skips server/examples/tests), -j2 so a 1GB Pi
-  # doesn't run out of memory compiling.
+  # LLAMA_BUILD_SERVER must stay ON: llama-cli is built from the server code
+  # now. Building only the llama-cli target skips the other tools; -j2 so a
+  # 1GB Pi doesn't run out of memory compiling.
   cmake -B build \
-        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-latomic" -DCMAKE_SHARED_LINKER_FLAGS="-latomic"
   cmake --build build --config Release -j2 --target llama-cli
   cd - > /dev/null
