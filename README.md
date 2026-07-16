@@ -85,7 +85,7 @@ Troubleshooting:
 ./run.sh
 ```
 
-Press ENTER, speak, wait, listen. Ctrl+C to quit.
+Press ENTER, speak, press ENTER again when done, wait, listen. Ctrl+C to quit.
 
 The first reply is slow because the model has to load — later replies are faster.
 

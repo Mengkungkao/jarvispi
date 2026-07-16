@@ -12,6 +12,7 @@ import sys
 import json
 import time
 import queue
+import threading
 import subprocess
 
 try:
@@ -113,14 +114,22 @@ def pick_mic():
 # The three stages
 # ---------------------------------------------------------------
 def listen(model, mic_index):
-    """Record from mic until Vosk detects end of utterance, return text."""
+    """Record from the mic until the user presses ENTER again, return text."""
     rec = KaldiRecognizer(model, SAMPLE_RATE)
     audio_q = queue.Queue()
+    stop = threading.Event()
+
+    def wait_for_enter():
+        input()
+        stop.set()
+
+    threading.Thread(target=wait_for_enter, daemon=True).start()
 
     def callback(indata, frames, time_info, status):
         audio_q.put(bytes(indata))
 
-    display.status("Listening... speak now")
+    display.status("Listening... speak, then press ENTER to stop")
+    pieces = []  # finalized sentence segments so far
     with sd.RawInputStream(
         samplerate=SAMPLE_RATE,
         blocksize=8000,
@@ -129,18 +138,28 @@ def listen(model, mic_index):
         device=mic_index,
         callback=callback,
     ):
-        while True:
-            data = audio_q.get()
+        while not stop.is_set():
+            try:
+                data = audio_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
             if rec.AcceptWaveform(data):
                 text = json.loads(rec.Result()).get("text", "").strip()
                 if text:
-                    print()  # end the partial-results line
-                    return text
+                    pieces.append(text)
             else:
-                # live feedback so you can see the mic is actually working
                 partial = json.loads(rec.PartialResult()).get("partial", "")
-                if partial:
-                    print(f"\r  (hearing: {partial[-60:]})", end="", flush=True)
+                heard_so_far = " ".join(pieces + [partial]).strip()
+                if heard_so_far:
+                    # live feedback so you can see the mic is actually working
+                    print(f"\r  (hearing: {heard_so_far[-60:]})", end="", flush=True)
+
+    # flush whatever was still buffered when ENTER was pressed
+    text = json.loads(rec.FinalResult()).get("text", "").strip()
+    if text:
+        pieces.append(text)
+    print()  # end the partial-results line
+    return " ".join(pieces)
 
 
 def think(prompt):
@@ -227,6 +246,9 @@ def main():
         try:
             input("\nPress ENTER to talk (Ctrl+C to quit)... ")
             heard = listen(vosk_model, mic_index)
+            if not heard:
+                display.status("Didn't catch anything - press ENTER and try again.")
+                continue
             display.show_user(heard)
             reply = think(heard)
             display.show_bot(reply)
