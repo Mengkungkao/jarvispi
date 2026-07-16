@@ -51,7 +51,15 @@ else
 fi
 cd ..
 
-ARCH=$(uname -m)
+# Use the userland arch, not the kernel arch: 32-bit Raspberry Pi OS runs a
+# 64-bit kernel on Pi 3B / Zero 2W, so uname -m reports aarch64 even though
+# the OS can only run armv7l binaries.
+case "$(dpkg --print-architecture)" in
+  armhf|armel) ARCH=armv7l ;;
+  arm64)       ARCH=aarch64 ;;
+  amd64)       ARCH=x86_64 ;;
+  *)           ARCH=$(uname -m) ;;
+esac
 if [ ! -d "piper" ]; then
   echo "Downloading Piper binary for $ARCH..."
   wget -q --show-progress "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_${ARCH}.tar.gz"
@@ -67,8 +75,13 @@ if [ ! -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
     git clone https://github.com/ggerganov/llama.cpp --depth 1 "$HOME/llama.cpp"
   fi
   cd "$HOME/llama.cpp"
-  cmake -B build
-  cmake --build build --config Release -j4
+  # -latomic: 32-bit ARM needs libatomic linked explicitly for 64-bit atomics.
+  # Only build llama-cli (skips server/examples/tests), -j2 so a 1GB Pi
+  # doesn't run out of memory compiling.
+  cmake -B build \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF \
+        -DCMAKE_EXE_LINKER_FLAGS="-latomic" -DCMAKE_SHARED_LINKER_FLAGS="-latomic"
+  cmake --build build --config Release -j2 --target llama-cli
   cd - > /dev/null
 else
   echo "llama.cpp already built, skipping."
