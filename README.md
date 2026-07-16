@@ -60,6 +60,19 @@ Note: while the mic is active the headset runs in headset (HFP) mode, so
 playback is phone-call quality — that's a Bluetooth limitation, fine for
 a voice assistant.
 
+Troubleshooting:
+
+- `Failed to set power on: org.bluez.Error.Failed` — check `rfkill list`
+  and `sudo rfkill unblock bluetooth` if soft-blocked; if
+  `dmesg | grep -i brcm` shows a firmware load failure, install the Pi
+  bluetooth packages: `sudo apt install -y bluez-firmware pi-bluetooth`
+  and reboot.
+- `Failed to connect: ... br-connection-profile-unavailable` — PipeWire's
+  Bluetooth plugin isn't loaded yet (it only registers audio profiles
+  with BlueZ when WirePlumber starts). Reboot, or run
+  `systemctl --user restart pipewire pipewire-pulse wireplumber`, then
+  connect again.
+
 ### Option B: USB mic + HDMI speaker
 
 1. Set audio output to HDMI: `sudo raspi-config` → System Options → Audio → HDMI

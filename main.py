@@ -10,6 +10,7 @@ Later, swap ConsoleDisplay for WhisplayDisplay without touching the loop.
 import os
 import sys
 import json
+import time
 import queue
 import subprocess
 
@@ -46,6 +47,12 @@ SYSTEM_PROMPT = (
 class ConsoleDisplay:
     def status(self, text):
         print(f"\n[STATUS] {text}")
+
+    def thinking(self, elapsed, frame):
+        print(f"\r[STATUS] Thinking {frame}  {elapsed}s ", end="", flush=True)
+
+    def clear_line(self):
+        print("\r" + " " * 70 + "\r", end="", flush=True)
 
     def show_user(self, text):
         print(f"YOU:  {text}")
@@ -127,7 +134,13 @@ def listen(model, mic_index):
             if rec.AcceptWaveform(data):
                 text = json.loads(rec.Result()).get("text", "").strip()
                 if text:
+                    print()  # end the partial-results line
                     return text
+            else:
+                # live feedback so you can see the mic is actually working
+                partial = json.loads(rec.PartialResult()).get("partial", "")
+                if partial:
+                    print(f"\r  (hearing: {partial[-60:]})", end="", flush=True)
 
 
 def think(prompt):
@@ -148,14 +161,27 @@ def think(prompt):
         "-o", reply_file,
     ]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        start = time.time()
+        frames = "|/-\\"
+        i = 0
+        while proc.poll() is None:
+            display.thinking(int(time.time() - start), frames[i % len(frames)])
+            i += 1
+            time.sleep(0.25)
+            if time.time() - start > 180:
+                proc.kill()
+                proc.wait()
+                display.clear_line()
+                return "Sorry, that took too long to think about."
+        display.clear_line()
         with open(reply_file) as f:
             out = f.read()
         # file format: "User:\n<question>\n\nAssistant:\n<reply>\n"
         reply = out.split("Assistant:", 1)[-1].strip()
         return reply if reply else "Sorry, I came up blank on that one."
-    except subprocess.TimeoutExpired:
-        return "Sorry, that took too long to think about."
     except Exception as e:
         display.error(f"LLM error: {e}")
         return "Something went wrong in my brain."
