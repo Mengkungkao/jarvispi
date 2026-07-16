@@ -83,16 +83,22 @@ def check_files():
 
 
 def pick_mic():
-    """Auto-select the first device with input channels (usually the USB mic)."""
+    """Prefer the system default route (PipeWire/Pulse) so Bluetooth mics
+    work; fall back to the first raw device with input channels (USB mic)."""
     try:
         devices = sd.query_devices()
+        for wanted in ("pipewire", "pulse", "default"):
+            for idx, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0 and wanted in dev["name"].lower():
+                    display.status(f"Using mic: {dev['name']} (device {idx})")
+                    return idx
         for idx, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
                 display.status(f"Using mic: {dev['name']} (device {idx})")
                 return idx
     except Exception as e:
         display.error(f"Could not query audio devices: {e}")
-    display.error("No microphone found. Plug in a USB mic and try again.")
+    display.error("No microphone found. Plug in a USB mic or connect a Bluetooth headset.")
     sys.exit(1)
 
 
